@@ -934,229 +934,6 @@ def has_useful_resolution(resolution: dict) -> bool:
     return False
 
 
-def deterministic_open_action(resolution: dict) -> str | None:
-    """
-    For confident `verb=open` resolutions, execute the `open` command
-    *server-side* (from this Python process, which is unsandboxed) and
-    return only the spoken response text — no action tag for Clicky to
-    re-run.
-
-    Why server-side: the Clicky binary is sandboxed (entitlement
-    `com.apple.security.app-sandbox = true` with only
-    `files.user-selected.read-write`). When Clicky's `do shell script
-    "open -a X /path"` runs, the shell inherits Clicky's sandbox and
-    LaunchServices fails with error -54 (`permErr`) for any path under
-    `~/Downloads`, `~/Desktop`, etc. The proxy is a regular Python
-    process started from the user's Terminal and inherits *no* sandbox,
-    so it can launch `open` against any path freely.
-
-    Covers three open shapes:
-      - app + folder/file → `open -a <app> <path>`
-      - folder/file only  → `open <path>`        (LaunchServices default app)
-      - app only          → `open -a <app>`
-
-    Returns the spoken response text on success, or None if the
-    resolution doesn't qualify or the subprocess fails (in which case
-    the caller falls through to the main LLM).
-    """
-    if resolution.get("verb") != "open":
-        return None
-
-    app_canonical_name = resolution.get("app_canonical_name")
-    folder_absolute_path = resolution.get("folder_abs_path")
-
-    if not app_canonical_name and not folder_absolute_path:
-        return None
-
-    # If the user clearly named a folder or file but we don't have a
-    # confident absolute path for it, fall through to Pro — don't emit
-    # a bogus "open just the app" action that ignores what they asked
-    # for. Pro can run mdfind, ask the user, or otherwise recover.
-    raw_phrases = resolution.get("raw_phrases") or {}
-    user_named_target = bool(raw_phrases.get("folder") or raw_phrases.get("file"))
-    if user_named_target and not folder_absolute_path:
-        return None
-
-    # Build the argv list (no shell quoting — subprocess.run with a list
-    # passes args directly to execve, so paths with spaces or quotes are safe).
-    if app_canonical_name and folder_absolute_path:
-        open_command_argv = ["open", "-a", app_canonical_name, folder_absolute_path]
-        folder_display_name = os.path.basename(folder_absolute_path) or folder_absolute_path
-        spoken_response = f"on it, opening {folder_display_name} in {app_canonical_name.lower()}."
-    elif folder_absolute_path:
-        open_command_argv = ["open", folder_absolute_path]
-        folder_display_name = os.path.basename(folder_absolute_path) or folder_absolute_path
-        spoken_response = f"opening {folder_display_name} in finder."
-    else:
-        open_command_argv = ["open", "-a", app_canonical_name]
-        spoken_response = f"opening {app_canonical_name.lower()}."
-
-    try:
-        completed = subprocess.run(
-            open_command_argv,
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except Exception as subprocess_error:
-        print(f"⚠️ Deterministic open subprocess error: {subprocess_error}")
-        return None
-
-    if completed.returncode != 0:
-        stderr_snippet = (completed.stderr or "").strip()[:300]
-        print(
-            f"⚠️ Deterministic open failed (rc={completed.returncode}): "
-            f"{' '.join(open_command_argv)}  stderr={stderr_snippet!r}"
-        )
-        return None
-
-    print(f"⚡ Deterministic open executed server-side: {' '.join(open_command_argv)}")
-    return spoken_response
-
-
-def lookup_contact_phone(name_query: str) -> tuple[str | None, list[str]]:
-    """
-    Query macOS Contacts.app for a person whose name contains `name_query`.
-
-    Returns `(phone_e164_no_plus, candidate_names)`:
-      - exactly one match    → (cleaned-phone-number, [])
-      - multiple matches     → (None, [candidate, candidate, …])
-      - zero matches / error → (None, [])
-
-    The phone is normalized: digits only, with `91` prepended if it's a
-    plain 10-digit Indian-style number with no country code.
-
-    First-run note: macOS will prompt for Contacts access on whatever
-    process tree the proxy lives in (usually Terminal). The user grants
-    it once via System Settings → Privacy & Security → Contacts.
-    """
-    if not name_query:
-        return None, []
-
-    # Use AppleScript via osascript. The contact name is interpolated into a
-    # string literal — escape any double-quotes in the query to prevent
-    # AppleScript syntax breakage.
-    safe_query = name_query.replace('"', '\\"')
-    osa_script = (
-        'tell application "Contacts"\n'
-        f'  set hits to (every person whose name contains "{safe_query}")\n'
-        '  if (count of hits) is 0 then\n'
-        '    return "NO_MATCH"\n'
-        '  else if (count of hits) > 1 then\n'
-        '    set candidateNames to {}\n'
-        '    repeat with p in hits\n'
-        '      set end of candidateNames to (name of p as text)\n'
-        '    end repeat\n'
-        '    return "MULTIPLE: " & (candidateNames as text)\n'
-        '  else\n'
-        '    return value of phone 1 of (item 1 of hits)\n'
-        '  end if\n'
-        'end tell'
-    )
-
-    try:
-        completed = subprocess.run(
-            ["osascript", "-e", osa_script],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except Exception as osa_error:
-        print(f"⚠️ Contacts lookup subprocess error: {osa_error}")
-        return None, []
-
-    if completed.returncode != 0:
-        stderr_snippet = (completed.stderr or "").strip()[:200]
-        print(f"⚠️ Contacts lookup failed (rc={completed.returncode}): {stderr_snippet!r}")
-        return None, []
-
-    raw_output = completed.stdout.strip()
-    if raw_output == "NO_MATCH":
-        return None, []
-    if raw_output.startswith("MULTIPLE:"):
-        candidate_block = raw_output[len("MULTIPLE:"):].strip()
-        # AppleScript joins lists with ", " by default
-        candidate_names = [name.strip() for name in candidate_block.split(",") if name.strip()]
-        return None, candidate_names
-
-    # Single match — strip everything except digits, then prepend country code
-    # if the number is a bare 10-digit Indian-format value.
-    digits_only = re.sub(r"\D", "", raw_output)
-    if len(digits_only) == 10 and not digits_only.startswith("91"):
-        digits_only = "91" + digits_only
-    return digits_only, []
-
-
-def deterministic_send_action(resolution: dict) -> str | None:
-    """
-    For confident `verb=send` resolutions targeting WhatsApp, look up the
-    contact's phone in Contacts.app and open the WhatsApp URL scheme
-    pre-loaded with that conversation. The user just hits Send — no
-    multi-step click flow, no Pro 3.1 round-trips, no rate-limit risk.
-
-    Currently only WhatsApp is wired up here:
-      - WhatsApp has a clean `whatsapp://send?phone=...&text=...` URL
-        scheme, so we can hand off completely to the OS in one shot.
-      - iMessage / Messages.app sends *immediately* via AppleScript with
-        no confirmation step, so we keep that on the LLM-driven path
-        until we have user-level approval gating.
-      - Telegram / Discord have no URL scheme — UI-driven only.
-
-    Returns the spoken response on success, None to fall through.
-    """
-    if resolution.get("verb") != "send":
-        return None
-    if resolution.get("app_canonical_name") != "WhatsApp":
-        return None
-
-    contact_query = resolution.get("contact_query")
-    if not contact_query:
-        return None
-
-    phone_e164_no_plus, candidate_names = lookup_contact_phone(contact_query)
-
-    if phone_e164_no_plus is None and candidate_names:
-        # Ambiguous — multiple contacts match. Don't deterministically pick;
-        # let the main LLM ask the user which person they meant.
-        print(f"⚠️ Contact {contact_query!r} matched {len(candidate_names)} people: {candidate_names}")
-        return None
-
-    if phone_e164_no_plus is None:
-        print(f"⚠️ Contact {contact_query!r} not found in Contacts.app")
-        return None
-
-    # Optional message text — falls through gracefully if not present.
-    message_text = (resolution.get("message_text") or "").strip()
-    whatsapp_url = f"whatsapp://send?phone={phone_e164_no_plus}"
-    if message_text:
-        from urllib.parse import quote
-        whatsapp_url += f"&text={quote(message_text)}"
-
-    try:
-        completed = subprocess.run(
-            ["open", whatsapp_url],
-            capture_output=True,
-            text=True,
-            timeout=8,
-        )
-    except Exception as send_error:
-        print(f"⚠️ WhatsApp URL scheme launch failed: {send_error}")
-        return None
-
-    if completed.returncode != 0:
-        stderr_snippet = (completed.stderr or "").strip()[:200]
-        print(f"⚠️ WhatsApp URL launch nonzero rc={completed.returncode}: {stderr_snippet!r}")
-        return None
-
-    # Mask the phone in the log; keep the contact name spoken.
-    masked_phone = phone_e164_no_plus[:4] + "*" * max(0, len(phone_e164_no_plus) - 4)
-    print(f"⚡ Deterministic WhatsApp send: opened {whatsapp_url.split('?')[0]}?phone={masked_phone}{'&text=…' if message_text else ''}")
-
-    if message_text:
-        return f"opened whatsapp with {contact_query.lower()} — your message is ready, hit send when you're set."
-    return f"opened whatsapp with {contact_query.lower()} — type and send when ready."
-
-
 def smart_find_applescript_close(text: str, content_start: int) -> int | None:
     """
     Find the closing `]` of an `[APPLESCRIPT:...]` tag.
@@ -1298,19 +1075,6 @@ def make_streaming_applescript_interceptor():
     return process_chunk, flush_remaining, get_intercepted_actions
 
 
-def stream_canned_response_as_sse(response_text: str):
-    """
-    Emit a fixed string as a Server-Sent-Events stream in the same chunk
-    format the Swift app expects from the live Gemini stream. Used to
-    deterministically short-circuit the /chat call when we've already
-    decided the action from the resolver.
-    """
-    payload = json.dumps({
-        "candidates": [{"content": {"parts": [{"text": response_text}]}}]
-    })
-    yield f"data: {payload}\n\n"
-
-
 # ── FastAPI app ───────────────────────────────────────────────────────────────
 
 app = FastAPI()
@@ -1416,28 +1180,17 @@ async def handle_chat(request: Request):
     # ── LLM-based intent resolution (pre-pass) ────────────────────────────────
     # Hand the noisy transcript to a fast Flash Lite call along with the
     # apps and folders sections of the system prompt, get back a structured
-    # JSON resolution. If it's a confident open-action, short-circuit the
-    # main LLM call and emit the action deterministically. Otherwise, inject
-    # the resolution into the user's last turn so Pro can use it.
+    # JSON resolution, and inject it into the user's last turn so the main
+    # model has the fuzzy-matched entities ready to use verbatim.
     resolution = {}
     if last_prompt and contents and contents[-1].role == "user":
         resolution = resolve_intent_with_llm(last_prompt, system)
 
-        # Path 1: deterministic short-circuits. Each handler decides whether
-        # the resolution belongs to its verb and either executes server-side
-        # (returning the spoken response) or returns None to fall through.
-        for shortcut_handler in (deterministic_open_action, deterministic_send_action):
-            deterministic_response = shortcut_handler(resolution)
-            if deterministic_response is not None:
-                print(f"🎯 Resolved entities: {json.dumps(resolution, ensure_ascii=False)}")
-                print(f"⚡ Deterministic action via {shortcut_handler.__name__} (skipping main model): "
-                      f"{deterministic_response.replace(chr(10), ' | ')}")
-                return StreamingResponse(
-                    stream_canned_response_as_sse(deterministic_response),
-                    media_type="text/event-stream",
-                )
-
-        # Path 2: inject the resolution into the prompt for the main model.
+        # Inject the resolution into the prompt for the main model. Gemini owns
+        # the decision of what to do — including emitting action tags and
+        # handling multi-step requests like "open X and write Y". The proxy
+        # never short-circuits server-side, because that drops any intent the
+        # shortcut doesn't understand (e.g. message_text after a verb=open).
         if has_useful_resolution(resolution):
             print(f"🎯 Resolved entities: {json.dumps(resolution, ensure_ascii=False)}")
             resolution_block = (
