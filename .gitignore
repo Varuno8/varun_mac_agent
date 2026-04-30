@@ -1,0 +1,8 @@
+.env
+*.log
+__pycache__/
+*.profraw
+venv/
+.venv/
+gemini_debug.log
+proxy.log

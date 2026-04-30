@@ -1,0 +1,68 @@
+flowchart TB
+    %% ========== User Layer ==========
+    User(["User"]):::user
+    Mic(["Microphone"]):::external
+    Screen(["Screen"]):::external
+    Speaker(["Speaker"]):::external
+    macOS(["macOS Apps / UI"]):::external
+
+    %% ========== Input Capture ==========
+    User -->|"holds ctrl+option (new task)<br/>or cmd+option (continue task)"| PTT["GlobalPushToTalk Monitor<br/>(listen-only CGEvent tap)"]:::input
+    User -->|"speaks"| Mic
+    Mic -->|"PCM audio"| Dictation["BuddyDictationManager<br/>(AVAudioEngine)"]:::input
+    PTT -->|"start / stop"| Dictation
+    Dictation -->|"audio buffers"| STT["Transcription Provider<br/>AssemblyAI · Gemini · OpenAI · Apple Speech"]:::input
+    Screen -->|"ScreenCaptureKit"| Capture["Screen Capture Utility<br/>(multi-monitor JPEGs)"]:::input
+
+    %% ========== Orchestrator ==========
+    STT -->|"transcript"| CM["CompanionManager<br/>Agentic Loop · max 8 iterations"]:::orch
+    Capture -->|"screenshots"| CM
+
+    %% ========== State / Memory ==========
+    CM <-->|"retrieve priors<br/>store on TASK_DONE"| Memory[("MemoryStore<br/>~/.micky_memory.json<br/>procedural · personal · tool")]:::state
+    CM <-->|"register · mark done"| Plan["Plan Model<br/>[PLAN] · [SUBTASK_DONE]<br/>injected each turn"]:::state
+    CM -->|"compress > 7 turns<br/>or > 25k chars"| Compact["Context Compaction"]:::state
+
+    %% ========== Reasoning ==========
+    CM -->|"system + user prompt<br/>+ history + screenshots"| Gemini["GeminiAPI<br/>analyzeImageStreaming (SSE)"]:::reasoning
+    Gemini -->|"HTTP POST localhost:8081"| Proxy["proxy.py<br/>(Cloudflare Worker locally)"]:::reasoning
+    Proxy -->|"HTTPS"| Cloud[/"Gemini Cloud<br/>3.1 Flash · Pro"/]:::cloud
+    Cloud -->|"SSE stream"| Proxy
+    Proxy -->|"chunks"| Gemini
+    Gemini -->|"full response text"| CM
+
+    %% ========== Parsing & Tool Guard ==========
+    CM -->|"raw response"| Parser["AgenticTagParser<br/>[APPLESCRIPT] [AXCLICK] [CLICK]<br/>[TYPE] [HOTKEY] [SCROLL] [WAIT]<br/>[SCREENSHOT] [CONFIRM] [POINT]<br/>[PLAN] [SUBTASK_DONE] [TASK_DONE]"]:::parser
+    Parser -->|"ActionTag[]"| Guard{"Tool Guard<br/>blocks rm -rf · dd if= ·<br/>| bash · eval · etc"}:::guard
+    Guard -->|"safe actions"| Exec["AgenticActionExecutor<br/>+ unverified-click backstop<br/>(refuse TYPE/HOTKEY:return<br/>after unconfirmed click)"]:::exec
+
+    %% ========== Action Mechanisms ==========
+    Exec -->|"NSAppleScript"| AS["AppleScript<br/>(open -a · do shell script)"]:::action
+    Exec -->|"AX tree walk + AXPress"| AXC["AccessibilityClicker"]:::action
+    AXC -.->|"no AX match → fallback"| OCR["OCRClicker<br/>Vision framework OCR"]:::action
+    Exec -->|"CGEvent.post"| HID["CGEvent<br/>(mouse · keystrokes)"]:::action
+
+    AS --> macOS
+    AXC --> macOS
+    OCR --> macOS
+    HID --> macOS
+
+    %% ========== Output ==========
+    CM -->|"spoken text<br/>(fire-and-forget on intermediate)"| TTS["TTS Client<br/>(ElevenLabs · Gemini TTS)"]:::output
+    TTS -->|"WAV / mp3 via AVAudioPlayer"| Speaker
+    CM -->|"[POINT:x,y:label]"| Overlay["OverlayWindow<br/>(blue cursor · bezier fly-to)"]:::output
+    Overlay --> Screen
+
+    %% ========== Styling ==========
+    classDef user fill:#a5d8ff,stroke:#1971c2,stroke-width:2px,color:#000
+    classDef external fill:#e7f5ff,stroke:#74c0fc,color:#000
+    classDef input fill:#b2f2bb,stroke:#37b24d,color:#000
+    classDef orch fill:#ffec99,stroke:#f59f00,stroke-width:3px,color:#000
+    classDef state fill:#ffc9c9,stroke:#e03131,color:#000
+    classDef reasoning fill:#d0bfff,stroke:#7048e8,color:#000
+    classDef cloud fill:#eebefa,stroke:#ae3ec9,color:#000
+    classDef parser fill:#ffd8a8,stroke:#e8590c,color:#000
+    classDef guard fill:#ffa8a8,stroke:#c92a2a,stroke-width:2px,color:#000
+    classDef exec fill:#ffd8a8,stroke:#e8590c,color:#000
+    classDef action fill:#fcc2d7,stroke:#c2255c,color:#000
+    classDef output fill:#99e9f2,stroke:#0c8599,color:#000
