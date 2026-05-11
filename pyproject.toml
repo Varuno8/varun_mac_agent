@@ -1,0 +1,21 @@
+[project]
+name = "micky-proxy"
+version = "0.2.0"
+description = "Python brain for Clicky/Micky — pydantic-ai orchestrator, tiered memory, MCP-first routing"
+requires-python = ">=3.13"
+
+dependencies = [
+    "fastapi>=0.136",
+    "uvicorn>=0.30",
+    "httpx>=0.28",
+    "google-genai>=1.73",
+    "google-auth>=2.49",
+    "google-cloud-bigquery>=3.20",
+    "pydantic>=2.13",
+    "pydantic-ai>=0.0.14",
+    "mcp>=1.0",
+    "websockets>=12.0",
+]
+
+[tool.uv]
+package = false

@@ -71,7 +71,6 @@ Worker vars: `ELEVENLABS_VOICE_ID`
 | `ElevenLabsTTSClient.swift` | ~81 | ElevenLabs TTS client. Sends text to the Worker proxy, plays back audio via `AVAudioPlayer`. Exposes `isPlaying` for transient cursor scheduling. |
 | `ElementLocationDetector.swift` | ~335 | Detects UI element locations in screenshots for cursor pointing. |
 | `DesignSystem.swift` | ~880 | Design system tokens — colors, corner radii, shared styles. All UI references `DS.Colors`, `DS.CornerRadius`, etc. |
-| `MickyMemoryStore.swift` | ~130 | Cross-session persistent memory. Stores procedural (what worked for which apps), personal (user facts/prefs), and tool (which action tags succeed for which app state) memories in `~/.micky_memory.json`. Retrieved before each task via keyword matching; injected into system prompt as `── RELEVANT PAST EXPERIENCE ──`. New memories are stored automatically after each `[TASK_DONE]`. |
 | `ClickyAnalytics.swift` | ~121 | PostHog analytics integration for usage tracking. |
 | `WindowPositionManager.swift` | ~262 | Window placement logic, Screen Recording permission flow, and accessibility permission helpers. |
 | `AppBundleConfiguration.swift` | ~28 | Runtime configuration reader for keys stored in the app bundle Info.plist. |

@@ -303,6 +303,22 @@ final class BuddyDictationManager: NSObject, ObservableObject {
         )
     }
 
+    // Tap-to-talk for panel buttons: starts recording via the microphone-button
+    // source (so stopPersistentDictationFromMicrophoneButton stops it) but
+    // auto-submits the transcript on stop, unlike the persistent dictation mode.
+    func startTapToTalkFromPanel(
+        updateDraftText: @escaping (String) -> Void,
+        submitDraftText: @escaping (String) -> Void
+    ) async {
+        await startPushToTalk(
+            startSource: .microphoneButton,
+            currentDraftText: "",
+            updateDraftText: updateDraftText,
+            submitDraftText: submitDraftText,
+            shouldAutomaticallySubmitFinalDraftOnStop: true
+        )
+    }
+
     func startPushToTalkFromKeyboardShortcut(
         currentDraftText: String,
         updateDraftText: @escaping (String) -> Void,

@@ -1,0 +1,52 @@
+name: Build Clicky
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # Use the latest available Xcode on the runner
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          xcodebuild -version
+
+      - name: Build Clicky
+        working-directory: clicky
+        run: |
+          xcodebuild build \
+            -project leanring-buddy.xcodeproj \
+            -scheme leanring-buddy \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=YES \
+            CODE_SIGNING_ALLOWED=YES \
+            DEVELOPMENT_TEAM="" \
+            2>&1 | tail -20
+
+      - name: Package app
+        working-directory: clicky
+        run: |
+          APP=$(find build -name "Clicky.app" -type d | head -1)
+          if [ -z "$APP" ]; then
+            echo "❌ Clicky.app not found in build output"
+            find build -name "*.app" -type d
+            exit 1
+          fi
+          echo "✅ Found: $APP"
+          ditto -c -k --sequesterRsrc --keepParent "$APP" Clicky.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Clicky
+          path: clicky/Clicky.zip
+          retention-days: 14

@@ -62,6 +62,12 @@ struct CompanionPanelView: View {
                 Spacer()
                     .frame(height: 12)
 
+                voiceButtonsSection
+                    .padding(.horizontal, 16)
+
+                Spacer()
+                    .frame(height: 12)
+
                 shortcutsSection
                     .padding(.horizontal, 16)
             }
@@ -244,6 +250,99 @@ struct CompanionPanelView: View {
                 }
                 .buttonStyle(.plain)
                 .pointerCursor()
+            }
+        }
+    }
+
+    // MARK: - Voice buttons (New Task / Continue)
+
+    private var voiceButtonsSection: some View {
+        let isRecording = companionManager.buddyDictationManager.isRecordingFromMicrophoneButton
+        let isBusy = companionManager.buddyDictationManager.isDictationInProgress
+
+        return VStack(spacing: 8) {
+            if isRecording {
+                // Recording in progress: show a single full-width Stop button
+                Button(action: {
+                    companionManager.buddyDictationManager.stopPersistentDictationFromMicrophoneButton()
+                }) {
+                    HStack(spacing: 6) {
+                        Circle()
+                            .fill(Color.red)
+                            .frame(width: 8, height: 8)
+                        Text("Stop Recording")
+                            .font(.system(size: 13, weight: .semibold))
+                            .foregroundColor(DS.Colors.textPrimary)
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 9)
+                    .background(
+                        RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                            .fill(Color.red.opacity(0.18))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                    .stroke(Color.red.opacity(0.35), lineWidth: 0.5)
+                            )
+                    )
+                }
+                .buttonStyle(.plain)
+                .pointerCursor()
+            } else {
+                HStack(spacing: 8) {
+                    // New Task button
+                    Button(action: {
+                        companionManager.startNewTaskRecordingFromPanel()
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "mic.fill")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("New Task")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.4 : 1)
+
+                    // Continue button
+                    Button(action: {
+                        companionManager.continueTaskRecordingFromPanel()
+                    }) {
+                        HStack(spacing: 5) {
+                            Image(systemName: "mic.badge.plus")
+                                .font(.system(size: 11, weight: .medium))
+                            Text("Continue")
+                                .font(.system(size: 13, weight: .semibold))
+                        }
+                        .foregroundColor(DS.Colors.textPrimary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 9)
+                        .background(
+                            RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                .fill(Color.white.opacity(0.07))
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: DS.CornerRadius.medium, style: .continuous)
+                                        .stroke(DS.Colors.borderSubtle, lineWidth: 0.5)
+                                )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                    .pointerCursor()
+                    .disabled(isBusy)
+                    .opacity(isBusy ? 0.4 : 1)
+                }
             }
         }
     }

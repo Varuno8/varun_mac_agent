@@ -124,6 +124,7 @@ final class CompanionManager: ObservableObject {
     private var audioPowerCancellable: AnyCancellable?
     private var accessibilityCheckTimer: Timer?
     private var pendingKeyboardShortcutStartTask: Task<Void, Never>?
+    private var pendingPanelButtonStartTask: Task<Void, Never>?
     /// Scheduled hide for transient cursor mode — cancelled if the user
     /// speaks again before the delay elapses.
     private var transientHideTask: Task<Void, Never>?
@@ -691,6 +692,64 @@ final class CompanionManager: ObservableObject {
 
     private let agenticExecutor = AgenticActionExecutor()
 
+    // MARK: - Panel button recording
+
+    /// "New Task" button: clears conversation history, then starts tap-to-talk.
+    /// If recording is already in progress, stops it instead.
+    func startNewTaskRecordingFromPanel() {
+        guard !showOnboardingVideo else { return }
+        if buddyDictationManager.isDictationInProgress {
+            buddyDictationManager.stopPersistentDictationFromMicrophoneButton()
+            return
+        }
+        if !conversationHistory.isEmpty {
+            let count = conversationHistory.count
+            conversationHistory.removeAll()
+            print("🧹 New-task panel button — cleared \(count) prior turn(s)")
+        }
+        startPanelButtonRecording()
+    }
+
+    /// "Continue" button: keeps conversation history, then starts tap-to-talk.
+    /// If recording is already in progress, stops it instead.
+    func continueTaskRecordingFromPanel() {
+        guard !showOnboardingVideo else { return }
+        if buddyDictationManager.isDictationInProgress {
+            buddyDictationManager.stopPersistentDictationFromMicrophoneButton()
+            return
+        }
+        print("🔁 Continue-task panel button — preserving \(conversationHistory.count) prior turn(s)")
+        startPanelButtonRecording()
+    }
+
+    private func startPanelButtonRecording() {
+        currentResponseTask?.cancel()
+        geminiTTSClient.stopPlayback()
+        clearDetectedElementLocation()
+        NotificationCenter.default.post(name: .mickyDismissPanel, object: nil)
+        MickyAnalytics.trackPushToTalkStarted()
+
+        transientHideTask?.cancel()
+        transientHideTask = nil
+        if !isMickyCursorEnabled && !isOverlayVisible {
+            overlayWindowManager.hasShownOverlayBefore = true
+            overlayWindowManager.showOverlay(onScreens: NSScreen.screens, companionManager: self)
+        }
+
+        pendingPanelButtonStartTask?.cancel()
+        pendingPanelButtonStartTask = Task {
+            await buddyDictationManager.startTapToTalkFromPanel(
+                updateDraftText: { _ in },
+                submitDraftText: { [weak self] finalTranscript in
+                    self?.lastTranscript = finalTranscript
+                    print("🗣️ Panel button received transcript: \(finalTranscript)")
+                    MickyAnalytics.trackUserMessageSent(transcript: finalTranscript)
+                    self?.sendTranscriptToClaudeWithScreenshot(transcript: finalTranscript)
+                }
+            )
+        }
+    }
+
     /// Agentic loop: captures screens → asks Gemini → speaks response →
     /// executes action tags → if [SCREENSHOT] tag found, loops again with
     /// fresh screen context. Hard cap: 5 iterations per turn.
@@ -749,14 +808,12 @@ final class CompanionManager: ObservableObject {
                         (userPlaceholder: entry.userTranscript, assistantResponse: entry.assistantResponse)
                     }
 
-                    // Build the per-iteration system prompt: base + relevant memories on first turn only.
-                    let iterationSystemPrompt: String
-                    if iterationCount == 1 {
-                        let memoryBlock = MickyMemoryStore.shared.relevantMemoriesSystemBlock(for: transcript)
-                        iterationSystemPrompt = Self.companionVoiceResponseSystemPrompt + memoryBlock
-                    } else {
-                        iterationSystemPrompt = Self.companionVoiceResponseSystemPrompt
-                    }
+                    // Memory tiers now live entirely on the Python side. The
+                    // proxy assembles core memory + LLM wiki search results
+                    // into the system prompt before the Gemini call, so the
+                    // Swift app sends only its base prompt and lets the
+                    // backend handle persistence and retrieval.
+                    let iterationSystemPrompt = Self.companionVoiceResponseSystemPrompt
 
                     // Build the per-iteration user prompt: plan block (if registered) + the actual prompt.
                     var promptForThisTurn = currentUserPrompt
@@ -915,17 +972,11 @@ final class CompanionManager: ObservableObject {
 
                     // Decide whether to loop or stop
                     if isTaskDone {
-                        // Store a procedural memory of this completed task so future
-                        // similar tasks can benefit from what approach worked.
-                        let taskSummary = String(allSpokenText.joined(separator: " ").prefix(400))
-                        let taskKeywords = extractKeywordsForMemory(from: transcript)
-                        if !taskSummary.isEmpty && !taskKeywords.isEmpty {
-                            MickyMemoryStore.shared.store(
-                                category: .procedural,
-                                content: "Task: \(transcript.prefix(100)). Outcome: \(taskSummary)",
-                                keywords: taskKeywords
-                            )
-                        }
+                        // Memory writes now happen on the Python side: the
+                        // proxy fires its wiki summarizer in a background
+                        // thread when [TASK_DONE] is seen, classifying the
+                        // task as wiki-worthy and appending a dense note to
+                        // ~/.clicky_wiki/<topic>.md when warranted.
                         // Gemini explicitly declared done — exit the loop
                         break
                     } else if executableActions.isEmpty {
@@ -951,6 +1002,9 @@ final class CompanionManager: ObservableObject {
 
             } catch is CancellationError {
                 // User spoke again — interrupted
+            } catch let urlError as NSError where urlError.domain == NSURLErrorDomain && urlError.code == NSURLErrorCancelled {
+                // URLSession request was cancelled because the Swift task was cancelled (e.g. user pressed
+                // the shortcut again mid-stream). Treat identically to CancellationError — not a real failure.
             } catch {
                 MickyAnalytics.trackResponseError(error: error.localizedDescription)
                 print("⚠️ Companion response error: \(error)")
@@ -1049,27 +1103,6 @@ final class CompanionManager: ObservableObject {
         print("🗜️ Compacted \(turnsToCompress.count) old history entries (\(totalCharacterCount) chars → summary)")
     }
 
-    // MARK: - Memory Helpers
-
-    /// Extracts meaningful keywords from a transcript for memory indexing.
-    /// Filters stop words and short tokens; returns up to 8 unique words.
-    private func extractKeywordsForMemory(from text: String) -> [String] {
-        let stopWords = Set([
-            "the", "and", "for", "with", "this", "that", "have", "from",
-            "they", "will", "been", "were", "are", "was", "you", "can",
-            "not", "but", "its", "also", "then", "into", "open", "just"
-        ])
-        var seen: Set<String> = []
-        return text.lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.inverted)
-            .filter { $0.count >= 4 && !stopWords.contains($0) }
-            .compactMap { word -> String? in
-                guard seen.insert(word).inserted else { return nil }
-                return word
-            }
-            .prefix(8)
-            .map { $0 }
-    }
 
     /// Speaks a hardcoded error message using macOS system TTS when the
     /// Gemini API is unavailable. Uses NSSpeechSynthesizer as a fallback.

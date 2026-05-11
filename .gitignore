@@ -6,3 +6,10 @@ venv/
 .venv/
 gemini_debug.log
 proxy.log
+metrics.jsonl
+task_state.json
+
+# MCP bridge
+clicky-mcp-bridge/node_modules/
+clicky-mcp-bridge/corsair.db
+clicky-mcp-bridge/.clicky_kek

@@ -110,6 +110,12 @@ enum CompanionScreenCaptureUtility {
                 screenLabel = "screen \(displayIndex + 1) of \(sortedDisplays.count) — secondary screen"
             }
 
+            // Use cgImage.width/height (actual captured dimensions) rather than
+            // configuration.width/height (requested dimensions). SCKit may round
+            // the output size to GPU-alignment boundaries, so the actual image
+            // can differ from what was requested. The coordinate mapper divides
+            // click positions by these values, so using the wrong size shifts
+            // every click by a systematic offset.
             capturedScreens.append(CompanionScreenCapture(
                 imageData: jpegData,
                 label: screenLabel,
@@ -117,8 +123,8 @@ enum CompanionScreenCaptureUtility {
                 displayWidthInPoints: Int(displayFrame.width),
                 displayHeightInPoints: Int(displayFrame.height),
                 displayFrame: displayFrame,
-                screenshotWidthInPixels: configuration.width,
-                screenshotHeightInPixels: configuration.height
+                screenshotWidthInPixels: cgImage.width,
+                screenshotHeightInPixels: cgImage.height
             ))
         }
 
