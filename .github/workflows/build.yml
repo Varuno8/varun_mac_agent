@@ -42,6 +42,17 @@ jobs:
             exit 1
           fi
           echo "✅ Found: $APP"
+
+          # Re-sign every framework and the app with the same ad-hoc identity
+          # so macOS doesn't reject framework loads due to team ID mismatch.
+          find "$APP" -name "*.framework" -type d | while read fw; do
+            codesign --force --sign - "$fw" 2>/dev/null || true
+          done
+          find "$APP" -name "*.dylib" -o -name "*.so" | while read lib; do
+            codesign --force --sign - "$lib" 2>/dev/null || true
+          done
+          codesign --force --sign - "$APP"
+
           ditto -c -k --sequesterRsrc --keepParent "$APP" Clicky.zip
 
       - name: Upload artifact
