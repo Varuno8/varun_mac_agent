@@ -207,6 +207,75 @@ enum AccessibilityClicker {
         return value as? [AXUIElement]
     }
 
+    /// AX hit-test: returns the frame of the actionable element at the given
+    /// screen point (CG coordinates, top-left origin, points). Used to snap
+    /// imprecise pixel clicks from the vision model to the true center of the
+    /// underlying button / link / icon. Returns nil when no element responds
+    /// to hit-testing at that point, or when the hit element has no usable
+    /// frame, or when the hit element is too far from the requested point
+    /// (more than `maxOffsetPoints`) — guards against snapping to a giant
+    /// background container that contains the point but isn't what was meant.
+    static func hitTestActionableFrame(at point: CGPoint, maxOffsetPoints: CGFloat = 60) -> CGRect? {
+        let systemWide = AXUIElementCreateSystemWide()
+        var hitElement: AXUIElement?
+        let result = AXUIElementCopyElementAtPosition(
+            systemWide,
+            Float(point.x),
+            Float(point.y),
+            &hitElement
+        )
+        guard result == .success, let hit = hitElement else { return nil }
+
+        // Walk up the AX tree until we find an element that has a clickable
+        // role — buttons, links, menu items, checkboxes, cells. The system-
+        // wide hit-test often returns the leaf static text or image inside a
+        // button; the button itself is the parent. Cap the walk at 5 levels
+        // to avoid runaway loops on weird hierarchies.
+        let clickableRoles: Set<String> = [
+            "AXButton", "AXLink", "AXMenuItem", "AXMenuButton",
+            "AXCheckBox", "AXRadioButton", "AXPopUpButton",
+            "AXCell", "AXRow", "AXTab", "AXToolbarButton",
+        ]
+
+        var current: AXUIElement? = hit
+        var hops = 0
+        while let element = current, hops < 5 {
+            var roleRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success,
+               let role = roleRef as? String,
+               clickableRoles.contains(role),
+               let frame = frame(of: element) {
+                let dx = max(point.x - frame.maxX, frame.minX - point.x, 0)
+                let dy = max(point.y - frame.maxY, frame.minY - point.y, 0)
+                let distance = (dx * dx + dy * dy).squareRoot()
+                if distance <= maxOffsetPoints {
+                    return frame
+                }
+                return nil
+            }
+            var parentRef: CFTypeRef?
+            if AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &parentRef) == .success,
+               let parentRef {
+                current = (parentRef as! AXUIElement)
+            } else {
+                current = nil
+            }
+            hops += 1
+        }
+
+        // No clickable ancestor — fall back to the immediate hit element's
+        // frame if it's small enough to be a real target.
+        if let frame = frame(of: hit), frame.width < 400, frame.height < 400 {
+            let dx = max(point.x - frame.maxX, frame.minX - point.x, 0)
+            let dy = max(point.y - frame.maxY, frame.minY - point.y, 0)
+            let distance = (dx * dx + dy * dy).squareRoot()
+            if distance <= maxOffsetPoints {
+                return frame
+            }
+        }
+        return nil
+    }
+
     /// AX positions/sizes come back as AXValue refs. We unbox them into a
     /// CGRect in screen coordinates (top-left origin, points).
     private static func frame(of element: AXUIElement) -> CGRect? {

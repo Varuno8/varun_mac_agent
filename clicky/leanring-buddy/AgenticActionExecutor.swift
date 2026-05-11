@@ -336,13 +336,29 @@ final class AgenticActionExecutor {
     // MARK: - Mouse
 
     private func postMouseClick(x: Int, y: Int, screen: Int?, clickCount: Int, button: CGMouseButton) {
-        let cgPoint = AgenticCoordinateMapper.cgEventGlobal(
+        let mappedPoint = AgenticCoordinateMapper.cgEventGlobal(
             screenshotX: x, screenshotY: y,
             actualScreenshotWidth: lastScreenshotWidth,
             actualScreenshotHeight: lastScreenshotHeight,
             screenIndex: screen
         )
-        print("🖱️ Click: screenshot(\(x),\(y)) → cgEvent(\(Int(cgPoint.x)),\(Int(cgPoint.y)))")
+
+        // Snap to the center of the nearest actionable AX element (button,
+        // link, menu item, etc.). Handles Gemini's slight pixel imprecision
+        // — a click that lands near a button's edge gets pulled to its true
+        // center. Falls back to the mapped point if hit-testing finds
+        // nothing nearby (canvas elements, unlabeled icons).
+        let cgPoint: CGPoint
+        if let snapFrame = AccessibilityClicker.hitTestActionableFrame(at: mappedPoint) {
+            cgPoint = CGPoint(x: snapFrame.midX, y: snapFrame.midY)
+            let dx = Int(cgPoint.x - mappedPoint.x)
+            let dy = Int(cgPoint.y - mappedPoint.y)
+            print("🖱️ Click: screenshot(\(x),\(y)) → cgEvent(\(Int(mappedPoint.x)),\(Int(mappedPoint.y))) → AX-snapped(\(Int(cgPoint.x)),\(Int(cgPoint.y))) [Δ \(dx),\(dy)]")
+        } else {
+            cgPoint = mappedPoint
+            print("🖱️ Click: screenshot(\(x),\(y)) → cgEvent(\(Int(cgPoint.x)),\(Int(cgPoint.y))) [no AX snap]")
+        }
+
         let downType: CGEventType = button == .left ? .leftMouseDown : .rightMouseDown
         let upType: CGEventType = button == .left ? .leftMouseUp : .rightMouseUp
 
