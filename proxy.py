@@ -1729,6 +1729,11 @@ def execute_applescript_server_side(script: str) -> tuple[bool, str]:
     `Operation not permitted`. The proxy is a regular Python process
     started from the user's Terminal — no sandbox — so anything Clicky
     can't do, the proxy can.
+
+    Side effect: when the script activates/launches a GUI app, run a
+    follow-up zoom so the app opens filling the visible screen instead
+    of restoring its last (often tiny) saved window size. Disable via
+    `MICKY_MAXIMIZE_OPENED_APPS=0`.
     """
     try:
         completed = subprocess.run(
@@ -1739,9 +1744,76 @@ def execute_applescript_server_side(script: str) -> tuple[bool, str]:
         )
     except Exception as run_error:
         return False, f"subprocess error: {run_error}"
-    if completed.returncode == 0:
-        return True, (completed.stdout or "").strip()[:300]
-    return False, f"rc={completed.returncode}: {(completed.stderr or '').strip()[:300]}"
+    if completed.returncode != 0:
+        return False, f"rc={completed.returncode}: {(completed.stderr or '').strip()[:300]}"
+
+    if os.environ.get("MICKY_MAXIMIZE_OPENED_APPS", "1") == "1":
+        opened_app = _detect_activated_app_name(script)
+        if opened_app:
+            _maximize_app_window(opened_app)
+
+    return True, (completed.stdout or "").strip()[:300]
+
+
+_ACTIVATE_TELL_RE = re.compile(
+    r'tell\s+application\s+"([^"]+)"\s+to\s+(?:activate|launch)',
+    re.IGNORECASE,
+)
+_ACTIVATE_BLOCK_RE = re.compile(
+    r'tell\s+application\s+"([^"]+)".*?\bactivate\b',
+    re.IGNORECASE | re.DOTALL,
+)
+_OPEN_DASH_A_RE = re.compile(
+    r'open\s+-a\s+["\']?([^"\'&;]+?)["\']?(?:\s|$|"|\')',
+    re.IGNORECASE,
+)
+
+
+def _detect_activated_app_name(script: str) -> str | None:
+    """Return the app name if `script` launches or activates a GUI app."""
+    for pattern in (_ACTIVATE_TELL_RE, _ACTIVATE_BLOCK_RE):
+        m = pattern.search(script)
+        if m:
+            name = m.group(1).strip()
+            if name and name.lower() not in {"system events", "finder"}:
+                return name
+    m = _OPEN_DASH_A_RE.search(script)
+    if m:
+        return m.group(1).strip()
+    return None
+
+
+def _maximize_app_window(app_name: str) -> None:
+    """Fire-and-forget: set the front window of `app_name` to fill the
+    screen. macOS clamps oversized bounds to the visible frame, so we
+    just pass a huge size and let the OS shrink it to the right thing.
+    Wrapped in `try` blocks so apps without AX-controllable windows
+    don't error out."""
+    safe = app_name.replace('"', '\\"')
+    zoom_script = (
+        f'delay 0.5\n'
+        f'tell application "System Events"\n'
+        f'  tell process "{safe}"\n'
+        f'    try\n'
+        f'      set frontmost to true\n'
+        f'      delay 0.2\n'
+        f'      if (count of windows) > 0 then\n'
+        f'        set position of window 1 to {{0, 0}}\n'
+        f'        set size of window 1 to {{4000, 3000}}\n'
+        f'      end if\n'
+        f'    end try\n'
+        f'  end tell\n'
+        f'end tell\n'
+    )
+    try:
+        subprocess.run(
+            ["osascript", "-e", zoom_script],
+            capture_output=True,
+            timeout=5,
+        )
+        print(f"📐 Auto-maximized window of '{app_name}'")
+    except Exception as zoom_error:
+        print(f"⚠️ Auto-maximize failed for '{app_name}': {zoom_error}")
 
 
 def make_streaming_action_interceptor():
